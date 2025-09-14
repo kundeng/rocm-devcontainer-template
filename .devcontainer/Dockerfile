@@ -2,9 +2,13 @@
 ARG ROCM_SERIES=6.4.3
 ARG ROCM_MM=6.4
 ARG TORCH_INDEX=https://download.pytorch.org/whl/rocm6.4
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 FROM rocm/dev-ubuntu-24.04:${ROCM_MM}-complete
 ARG TORCH_INDEX
+ARG USER_UID
+ARG USER_GID
 ENV DEBIAN_FRONTEND=noninteractive     UV_NO_MODIFY_PATH=1     PIP_DISABLE_PIP_VERSION_CHECK=1     PYTHONDONTWRITEBYTECODE=1     VLLM_USE_ROCM=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends     git build-essential cmake ninja-build     python3 python3-venv python3-pip     clang wget curl ca-certificates pkg-config   && rm -rf /var/lib/apt/lists/*
@@ -13,9 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends     git build-e
 RUN curl -LsSf https://astral.sh/uv/install.sh | bash && ln -sf /root/.local/bin/uv /usr/local/bin/uv
 
 WORKDIR /workspace
-RUN uv venv /opt/venv && \
-    /opt/venv/bin/python -m ensurepip --upgrade && \
-    /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
+
+RUN uv venv /opt/venv &&     /opt/venv/bin/python -m ensurepip --upgrade &&     /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
 ENV PATH="/opt/venv/bin:${PATH}"
 
 # PyTorch ROCm wheels
@@ -23,5 +26,12 @@ RUN /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools &&     /o
 
 # vLLM (ROCm)
 RUN /opt/venv/bin/python -m pip install --no-cache-dir "vllm>=0.6.4"
+# Ensure a group exists with the host GID and add the existing user to it
+RUN groupadd --gid ${USER_GID} hostgroup || true  && usermod -aG hostgroup ubuntu || true
 
+# Create render/video groups (if detected on host) and add the existing user to them
+RUN if [ -n "992" ]; then groupadd --gid 992 host_render || true && usermod -aG host_render ubuntu || true; fi  && if [ -n "44" ]; then groupadd --gid 44 host_video || true && usermod -aG host_video ubuntu || true; fi
+
+USER ubuntu
+WORKDIR /workspace
 CMD ["/bin/bash"]

@@ -16,7 +16,11 @@ MIN_ROCM="6.4"                  # gfx1151 requires >= 6.4
 PREF_ROCM_FOR_LATEST="7.0"      # try this when --latest
 
 FORCE=0
-SKIP_DRIVER=0
+# By default, ensure kernel drivers/device nodes and group membership are handled.
+# The script will attempt to install kernel drivers by default when missing.
+# Full ROCm userland on the host is opt-in via --install-host-rocm.
+INSTALL_DRIVERS=1
+INSTALL_HOST_ROCM=0
 ROCM_PIN=""
 WANT_LATEST=0
 INSTALL_CODE=1        # install host VS Code via Microsoft APT (no snap)
@@ -30,23 +34,32 @@ sudo_if(){ if [[ ${EUID:-$(id -u)} -eq 0 ]]; then "$@"; else sudo "$@"; fi }
 
 usage(){
   cat <<EOF
-Usage: $0 [--rocm X.Y[.Z]] [--latest] [--force] [--no-driver] [--no-code] [--project DIR]
-  --rocm X.Y[.Z]   Pin ROCm version (default: ${DEFAULT_ROCM_FALLBACK})
-  --latest         Prefer newest available ROCm (tries ${PREF_ROCM_FOR_LATEST}*)
-  --force          Overwrite existing .devcontainer files
-  --no-driver      Skip host ROCm install
-  --no-code        Skip host VS Code install (Microsoft APT)
-  --project DIR    Folder to place .devcontainer (default: \$PWD)
+Usage: $0 [options]
+
+Options:
+  --rocm X.Y[.Z]       Pin ROCm version (default: ${DEFAULT_ROCM_FALLBACK})
+  --latest             Use the latest available ROCm series
+  --force              Overwrite any existing .devcontainer files
+  --install-host-rocm  Install full ROCm userland on the host (opt-in)
+  --no-install-drivers Do not attempt to install kernel GPU drivers (default: install if missing)
+  --no-code            Skip installing VS Code on the host
+  --project DIR        Folder to place .devcontainer (default: \$PWD)
+  -h, --help           Show this help and exit
+
+Examples:
+  $0                     # generate .devcontainer using defaults
+  $0 --force --rocm 6.4  # regenerate for ROCm 6.4 and overwrite files
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --rocm) ROCM_PIN="${2:?}"; shift 2;;
-    --latest) WANT_LATEST=1; shift;;
-    --force) FORCE=1; shift;;
-    --no-driver) SKIP_DRIVER=1; shift;;
-    --no-code) INSTALL_CODE=0; shift;;
+  --rocm) ROCM_PIN="${2:?}"; shift 2;;
+  --latest) WANT_LATEST=1; shift;;
+  --force) FORCE=1; shift;;
+  --install-host-rocm) INSTALL_HOST_ROCM=1; shift;;
+  --no-install-drivers) INSTALL_DRIVERS=0; shift;;
+  --no-code) INSTALL_CODE=0; shift;;
     --project) PROJECT_DIR="${2:?}"; DEVCONTAINER_DIR="${PROJECT_DIR}/.devcontainer"; shift 2;;
     -h|--help) usage; exit 0;;
     *) err "Unknown arg: $1"; usage; exit 1;;
@@ -159,7 +172,7 @@ install_rocm_via_apt_series(){
   local series="$1" codename
   codename="$(. /etc/os-release; echo "${UBUNTU_CODENAME:-noble}")"
   sudo_if install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo_if gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+  curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo_if gpg --batch --yes --dearmor -o /etc/apt/keyrings/rocm.gpg
   if [[ "$series" == "latest" ]]; then
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest ${codename} main" \
       | sudo_if tee /etc/apt/sources.list.d/rocm.list >/dev/null
@@ -177,7 +190,21 @@ install_rocm_via_apt_series(){
 
 install_rocm_host(){
   local selected="$1"
-  [[ $SKIP_DRIVER -eq 1 ]] && { log "Skipping host ROCm install (--no-driver)."; return; }
+  # Note: this function can perform a full ROCm userland install. Driver-only installs
+  # are handled by `install_drivers_only()` which calls into the same helpers where possible.
+  # If ROCm already appears installed in /opt/rocm and rocminfo runs, skip installation.
+  if [[ -x "/opt/rocm/bin/rocminfo" ]]; then
+    set +e
+    /opt/rocm/bin/rocminfo >/dev/null 2>&1
+    local rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      log "ROCm appears installed on host (/opt/rocm); skipping host install."
+      return
+    else
+      warn "Found /opt/rocm/bin/rocminfo but it failed to run; proceeding with install."
+    fi
+  fi
   case "$PKG" in
     apt)
       local series="$selected"
@@ -211,6 +238,63 @@ install_rocm_host(){
   esac
 }
 
+# Attempt to install only kernel drivers/device nodes (without full ROCm userland).
+install_drivers_only(){
+  local series="$1"
+  case "$PKG" in
+    apt)
+      log "Attempting to install kernel drivers (amdgpu/kfd) via AMD packages."
+      # Try the lightweight amdgpu-install path if available
+      local deb; deb="$(dl_amdgpu_pkg "$series" deb || true)"
+      if [[ -n "$deb" ]]; then
+        sudo_if dpkg -i "$deb" || true
+        sudo_if apt-get update -y
+        if have amdgpu-install; then
+          sudo_if amdgpu-install --usecase=hip,opencl --accept-eula -y || true
+          for g in render video docker; do id -nG "$USER" | grep -qw "$g" || sudo_if usermod -aG "$g" "$USER"; done
+          log "Driver install attempted; please reboot if kernel modules were updated."
+          return
+        fi
+      fi
+      warn "Driver installer not available; please follow AMD docs to install kernel drivers for your distro."
+      ;;
+    *) warn "Driver install automated steps focus on Debian/Ubuntu. Install drivers per AMD docs for your distro." ;;
+  esac
+}
+
+# Ensure kernel drivers/device nodes exist and add user to required groups.
+ensure_host_drivers(){
+  # Check kernel modules
+  if lsmod | grep -q -E 'amdgpu|kfd|amdkfd'; then
+    log "Kernel modules present: amdgpu/kfd"
+  else
+    warn "Kernel GPU drivers appear missing (amdgpu/kfd)."
+    if [[ ${INSTALL_DRIVERS:-1} -eq 1 ]]; then
+      log "Attempting to install drivers (use --no-install-drivers to opt out)."
+      install_drivers_only "$1"
+    else
+      warn "Driver installation skipped (use --install-host-rocm or omit --no-install-drivers)."
+    fi
+  fi
+
+  # Check device nodes
+  if [[ -e /dev/kfd ]] || ls /dev/dri/* >/dev/null 2>&1; then
+    log "GPU device nodes present."
+  else
+    warn "GPU device nodes (/dev/kfd or /dev/dri/*) not found. Containers won't see the GPU until drivers are installed and devices appear."
+  fi
+
+  # Ensure group membership
+  for g in render video docker; do
+    if id -nG "$USER" | grep -qw "$g"; then
+      log "User is already in group $g"
+    else
+      log "Adding $USER to group $g"
+      sudo_if usermod -aG "$g" "$USER" || warn "Failed to add $USER to $g; please add manually."
+    fi
+  done
+}
+
 # ---------- Docker ----------
 ensure_docker(){
   if have docker; then
@@ -221,7 +305,7 @@ ensure_docker(){
         sudo_if apt-get update -y
         sudo_if apt-get install -y ca-certificates curl gnupg
         sudo_if install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo_if gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo_if gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
         sudo_if chmod a+r /etc/apt/keyrings/docker.gpg
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${OS_CODENAME:-stable} stable" \
           | sudo_if tee /etc/apt/sources.list.d/docker.list >/dev/null
@@ -261,7 +345,7 @@ install_vscode_host(){
       sudo_if rm -f /etc/apt/sources.list.d/vscode.list /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
 
       sudo_if install -d -m 0755 /etc/apt/keyrings
-      curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo_if gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+  curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo_if gpg --batch --yes --dearmor -o /etc/apt/keyrings/microsoft.gpg
       echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
         | sudo_if tee /etc/apt/sources.list.d/vscode.list >/dev/null
 
@@ -280,6 +364,9 @@ install_vscode_host(){
 # ---------- Devcontainer files ----------
 write_devcontainer_files(){
   local rocm_series="$1"
+  local host_uid="${2:-1000}"
+  local host_gid="${3:-1000}"
+  # overwrite controlled by global FORCE (pass --force on CLI)
   local rocm_mm
   rocm_mm="$(echo "$rocm_series" | grep -Eo '^[0-9]+\.[0-9]+')" || true
   [[ -z "$rocm_mm" ]] && rocm_mm="6.4"   # default if parsing fails
@@ -288,19 +375,61 @@ write_devcontainer_files(){
 
   mkdir -p "$DEVCONTAINER_DIR"
 
+  # Detect if the base image already contains a user with host UID.
+  local base_image="rocm/dev-ubuntu-24.04:${rocm_mm}-complete"
+  local existing_user=""
+  if have docker; then
+    # Try to query /etc/passwd in the base image for the UID. If docker cannot pull it, ignore.
+    set +e
+    local out
+    out=$(docker run --rm --entrypoint sh "${base_image}" -c "getent passwd ${host_uid} || true" 2>/dev/null || true)
+    set -e
+    if [[ -n "${out// }" ]]; then
+      existing_user=$(echo "${out}" | head -n1 | cut -d: -f1)
+      log "Base image already has UID ${host_uid} as user '${existing_user}' — will reuse it."
+    else
+      log "No existing user with UID ${host_uid} in base image; will create 'devuser'."
+    fi
+  else
+    warn "Docker not available to inspect base image; defaulting to create 'devuser'."
+  fi
+
+  # Detect host render/video group IDs (used by /dev/kfd and /dev/dri)
+  local render_gid=""
+  local video_gid=""
+  if getent group render >/dev/null 2>&1; then
+    render_gid=$(getent group render | cut -d: -f3)
+  fi
+  if getent group video >/dev/null 2>&1; then
+    video_gid=$(getent group video | cut -d: -f3)
+  fi
+  # Fallback: stat device nodes
+  if [[ -z "$render_gid" && -e /dev/kfd ]]; then
+    render_gid=$(stat -c '%g' /dev/kfd || true)
+  fi
+  if [[ -z "$video_gid" && -e /dev/dri/card0 ]]; then
+    video_gid=$(stat -c '%g' /dev/dri/card0 || true)
+  fi
+
   # --- Dockerfile ---
   if [[ $FORCE -eq 0 && -f "${DEVCONTAINER_DIR}/Dockerfile" ]]; then
     log "Dockerfile exists; skipping (use --force to overwrite)."
   else
     log "Writing ${DEVCONTAINER_DIR}/Dockerfile"
-    cat > "${DEVCONTAINER_DIR}/Dockerfile" <<EOF
+    if [[ -n "${existing_user}" ]]; then
+      # Base image already has the UID — reuse that user; do not create devuser
+  cat > "${DEVCONTAINER_DIR}/Dockerfile" <<EOF
 # ROCm Dev Container (AI/LLM focus)
 ARG ROCM_SERIES=${rocm_series}
 ARG ROCM_MM=${rocm_mm}
 ARG TORCH_INDEX=${torch_index}
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 FROM rocm/dev-ubuntu-24.04:\${ROCM_MM}-complete
 ARG TORCH_INDEX
+ARG USER_UID
+ARG USER_GID
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_NO_MODIFY_PATH=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -321,6 +450,67 @@ WORKDIR /workspace
 RUN uv venv /opt/venv && \
     /opt/venv/bin/python -m ensurepip --upgrade && \
     /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
+ENV PATH="/opt/venv/bin:\${PATH}"
+
+# PyTorch ROCm wheels
+RUN /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools && \
+    /opt/venv/bin/python -m pip install "torch>=2.5" torchvision torchaudio --index-url "\${TORCH_INDEX}"
+
+# vLLM (ROCm)
+RUN /opt/venv/bin/python -m pip install --no-cache-dir "vllm>=0.6.4"
+# Ensure a group exists with the host GID and add the existing user to it
+RUN groupadd --gid \${USER_GID} hostgroup || true \
+ && usermod -aG hostgroup ${existing_user} || true
+
+# Create render/video groups (if detected on host) and add the existing user to them
+RUN if [ -n "${render_gid}" ]; then groupadd --gid ${render_gid} host_render || true && usermod -aG host_render ${existing_user} || true; fi \
+ && if [ -n "${video_gid}" ]; then groupadd --gid ${video_gid} host_video || true && usermod -aG host_video ${existing_user} || true; fi
+
+USER ${existing_user}
+WORKDIR /workspace
+CMD ["/bin/bash"]
+EOF
+    else
+      # No existing user — create devuser matching host UID/GID
+      cat > "${DEVCONTAINER_DIR}/Dockerfile" <<EOF
+# ROCm Dev Container (AI/LLM focus)
+ARG ROCM_SERIES=${rocm_series}
+ARG ROCM_MM=${rocm_mm}
+ARG TORCH_INDEX=${torch_index}
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+FROM rocm/dev-ubuntu-24.04:\${ROCM_MM}-complete
+ARG TORCH_INDEX
+ARG USER_UID
+ARG USER_GID
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_NO_MODIFY_PATH=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    VLLM_USE_ROCM=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential cmake ninja-build \
+    python3 python3-venv python3-pip \
+    clang wget curl ca-certificates pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user that matches the host UID/GID so mounted volumes are writable
+RUN groupadd --gid \${USER_GID} devuser \
+ && useradd --uid \${USER_UID} --gid \${USER_GID} -m devuser \
+ && apt-get update && apt-get install -y sudo \
+ && echo 'devuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/devuser \
+ && chmod 0440 /etc/sudoers.d/devuser
+
+# uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | bash && ln -sf /root/.local/bin/uv /usr/local/bin/uv
+
+WORKDIR /workspace
+
+RUN uv venv /opt/venv && \
+    /opt/venv/bin/python -m ensurepip --upgrade && \
+    /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
 ENV PATH="/opt/venv/bin:${PATH}"
 
 # PyTorch ROCm wheels
@@ -330,8 +520,11 @@ RUN /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools && \
 # vLLM (ROCm)
 RUN /opt/venv/bin/python -m pip install --no-cache-dir "vllm>=0.6.4"
 
+USER devuser
+WORKDIR /workspace
 CMD ["/bin/bash"]
 EOF
+    fi
   fi
 
   # --- devcontainer.json ---
@@ -339,11 +532,14 @@ EOF
     log "devcontainer.json exists; skipping (use --force to overwrite)."
   else
     log "Writing ${DEVCONTAINER_DIR}/devcontainer.json"
-    cat > "${DEVCONTAINER_DIR}/devcontainer.json" <<'EOF'
+    # If we detected an existing user in the base image, use it; otherwise default to 'devuser'
+    local remote_user
+    remote_user="${existing_user:-devuser}"
+  cat > "${DEVCONTAINER_DIR}/devcontainer.json" <<EOF
 {
   "name": "AMD AI-MAX 395 (ROCm) Dev",
-  "build": { "dockerfile": "Dockerfile" },
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "build": { "dockerfile": "Dockerfile", "args": { "USER_UID": ${host_uid}, "USER_GID": ${host_gid} } },
+  "workspaceMount": "source=\${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "workspaceFolder": "/workspace",
   "runArgs": [
     "--device=/dev/kfd",
@@ -354,8 +550,8 @@ EOF
     "--shm-size=16g"
   ],
   "containerEnv": { "VLLM_USE_ROCM": "1" },
-  "remoteUser": "root",
-  "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
+  "remoteUser": "${remote_user}",
+  "postCreateCommand": "bash \${containerWorkspaceFolder}/.devcontainer/setup.sh",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -374,7 +570,7 @@ EOF
     log "setup.sh exists; skipping (use --force to overwrite)."
   else
     log "Writing ${DEVCONTAINER_DIR}/setup.sh"
-    cat > "${DEVCONTAINER_DIR}/setup.sh" <<'EOF'
+  cat > "${DEVCONTAINER_DIR}/setup.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 python - <<'PY'
@@ -399,10 +595,22 @@ main(){
   local rocm_series
   rocm_series="$(pick_rocm_version)"
   log "Selected ROCm series: ${rocm_series}"
-  install_rocm_host "${rocm_series}"
+  # Ensure kernel drivers/device nodes/groups are present (non-invasive). Attempt to install drivers by default when missing.
+  ensure_host_drivers "${rocm_series}"
+  if [[ ${INSTALL_HOST_ROCM:-0} -eq 1 ]]; then
+    log "Full host ROCm install requested; attempting install."
+    install_rocm_host "${rocm_series}"
+  else
+    log "Full host ROCm userland install skipped (use --install-host-rocm to opt in)."
+  fi
 
   install_vscode_host
-  write_devcontainer_files "${rocm_series}"
+  # Detect host UID/GID to map container user to the host user for writable mounts
+  HOST_UID=$(id -u)
+  HOST_GID=$(id -g)
+  log "Using host UID:GID = ${HOST_UID}:${HOST_GID} for container user mapping"
+  # Generate devcontainer files; pass host UID/GID. Use --force to overwrite.
+  write_devcontainer_files "${rocm_series}" "${HOST_UID}" "${HOST_GID}"
 
   log "Done."
   echo "Open this folder in VS Code → “Dev Containers: Reopen in Container”."

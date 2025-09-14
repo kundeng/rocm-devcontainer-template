@@ -1,0 +1,26 @@
+{
+  "name": "AMD AI-MAX 395 (ROCm) Dev",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace",
+  "runArgs": [
+    "--device=/dev/kfd",
+    "--device=/dev/dri",
+    "--group-add=render",
+    "--group-add=video",
+    "--ipc=host",
+    "--shm-size=16g"
+  ],
+  "containerEnv": { "VLLM_USE_ROCM": "1" },
+  "remoteUser": "root",
+  "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "ms-vscode-remote.remote-containers"
+      ]
+    }
+  }
+}

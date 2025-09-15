@@ -486,6 +486,10 @@ RUN groupadd --gid \${USER_GID} hostgroup || true \
 RUN if [ -n "${render_gid}" ]; then groupadd --gid ${render_gid} host_render || true && usermod -aG host_render ${existing_user} || true; fi \
  && if [ -n "${video_gid}" ]; then groupadd --gid ${video_gid} host_video || true && usermod -aG host_video ${existing_user} || true; fi
 
+# Ensure the existing user can run sudo without a password (makes terminals usable)
+RUN apt-get update -y && apt-get install -y sudo || true \
+ && { echo "${existing_user} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-${existing_user} && chmod 0440 /etc/sudoers.d/99-${existing_user}; } || true
+
 USER ${existing_user}
 WORKDIR /workspace
 CMD ["/bin/bash"]

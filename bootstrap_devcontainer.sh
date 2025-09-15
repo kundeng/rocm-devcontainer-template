@@ -614,22 +614,34 @@ EOF
 # ---------- Main ----------
 main(){
   detect_os
-  ensure_basics
-  ensure_docker
+  if [[ ${DEVCONTAINER_ONLY:-0} -eq 0 ]]; then
+    ensure_basics
+    ensure_docker
+  else
+    log "DEVCONTAINER_ONLY=1; skipping host package/driver/Docker operations."
+  fi
 
   local rocm_series
   rocm_series="$(pick_rocm_version)"
   log "Selected ROCm series: ${rocm_series}"
   # Ensure kernel drivers/device nodes/groups are present (non-invasive). Attempt to install drivers by default when missing.
-  ensure_host_drivers "${rocm_series}"
-  if [[ ${INSTALL_HOST_ROCM:-0} -eq 1 ]]; then
-    log "Full host ROCm install requested; attempting install."
-    install_rocm_host "${rocm_series}"
+  if [[ ${DEVCONTAINER_ONLY:-0} -eq 0 ]]; then
+    ensure_host_drivers "${rocm_series}"
+    if [[ ${INSTALL_HOST_ROCM:-0} -eq 1 ]]; then
+      log "Full host ROCm install requested; attempting install."
+      install_rocm_host "${rocm_series}"
+    else
+      log "Full host ROCm userland install skipped (use --install-host-rocm to opt in)."
+    fi
   else
-    log "Full host ROCm userland install skipped (use --install-host-rocm to opt in)."
+    log "DEVCONTAINER_ONLY=1; skipping host driver/ROCm install checks."
   fi
 
-  install_vscode_host
+  if [[ ${DEVCONTAINER_ONLY:-0} -eq 0 ]]; then
+    install_vscode_host
+  else
+    log "DEVCONTAINER_ONLY=1; skipping VS Code host install."
+  fi
   # Detect host UID/GID to map container user to the host user for writable mounts
   HOST_UID=$(id -u)
   HOST_GID=$(id -g)

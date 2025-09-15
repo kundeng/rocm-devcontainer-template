@@ -552,7 +552,7 @@ EOF
   "containerEnv": { "VLLM_USE_ROCM": "1" },
   "remoteUser": "${remote_user}",
   "postCreateCommand": "bash \${containerWorkspaceFolder}/.devcontainer/setup.sh",
-  "overrideCommand": false,
+  "overrideCommand": true,
   "customizations": {
     "vscode": {
       "settings": {

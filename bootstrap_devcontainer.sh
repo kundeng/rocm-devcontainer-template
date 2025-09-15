@@ -552,8 +552,13 @@ EOF
   "containerEnv": { "VLLM_USE_ROCM": "1" },
   "remoteUser": "${remote_user}",
   "postCreateCommand": "bash \${containerWorkspaceFolder}/.devcontainer/setup.sh",
+  "overrideCommand": false,
   "customizations": {
     "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
       "extensions": [
         "ms-python.python",
         "ms-toolsai.jupyter",

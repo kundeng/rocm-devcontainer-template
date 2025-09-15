@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python - <<'PY'
+python - <<PY
 import torch
 print("torch:", torch.__version__)
 print("torch.version.hip:", getattr(getattr(torch,"version",None),"hip",None))

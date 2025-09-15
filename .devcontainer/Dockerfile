@@ -9,28 +9,48 @@ FROM rocm/dev-ubuntu-24.04:${ROCM_MM}-complete
 ARG TORCH_INDEX
 ARG USER_UID
 ARG USER_GID
-ENV DEBIAN_FRONTEND=noninteractive     UV_NO_MODIFY_PATH=1     PIP_DISABLE_PIP_VERSION_CHECK=1     PYTHONDONTWRITEBYTECODE=1     VLLM_USE_ROCM=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_NO_MODIFY_PATH=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    VLLM_USE_ROCM=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends     git build-essential cmake ninja-build     python3 python3-venv python3-pip     clang wget curl ca-certificates pkg-config   && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential cmake ninja-build \
+    python3 python3-venv python3-pip \
+    clang wget curl ca-certificates pkg-config \
+  && rm -rf /var/lib/apt/lists/*
 
 # uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | bash && ln -sf /root/.local/bin/uv /usr/local/bin/uv
 
 WORKDIR /workspace
 
-RUN uv venv /opt/venv &&     /opt/venv/bin/python -m ensurepip --upgrade &&     /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
+RUN uv venv /opt/venv && \
+    /opt/venv/bin/python -m ensurepip --upgrade && \
+    /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools
 ENV PATH="/opt/venv/bin:${PATH}"
 
 # PyTorch ROCm wheels
-RUN /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools &&     /opt/venv/bin/python -m pip install "torch>=2.5" torchvision torchaudio --index-url "${TORCH_INDEX}"
+RUN /opt/venv/bin/python -m pip install --upgrade pip wheel setuptools && \
+    /opt/venv/bin/python -m pip install "torch>=2.5" torchvision torchaudio --index-url "${TORCH_INDEX}"
 
 # vLLM (ROCm)
 RUN /opt/venv/bin/python -m pip install --no-cache-dir "vllm>=0.6.4"
-# Ensure a group exists with the host GID and add the existing user to it
-RUN groupadd --gid ${USER_GID} hostgroup || true  && usermod -aG hostgroup ubuntu || true
 
-# Create render/video groups (if detected on host) and add the existing user to them
-RUN if [ -n "992" ]; then groupadd --gid 992 host_render || true && usermod -aG host_render ubuntu || true; fi  && if [ -n "44" ]; then groupadd --gid 44 host_video || true && usermod -aG host_video ubuntu || true; fi
+# Ensure a group exists with the host GID and add the existing user to it
+RUN groupadd --gid ${USER_GID} hostgroup || true \
+ && usermod -aG hostgroup ubuntu || true
+
+# Note: render/video group GIDs are added at run-time via devcontainer runArgs
+
+# Ensure the existing user can run sudo without a password (makes terminals usable)
+RUN apt-get update -y && apt-get install -y sudo || true
+# Add user to sudo group and grant NOPASSWD to any sudo group member as a fallback
+RUN usermod -aG sudo ubuntu || true
+RUN echo "%sudo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-sudo-nopasswd && chmod 0440 /etc/sudoers.d/99-sudo-nopasswd || true
+# Also grant explicit NOPASSWD to the existing user
+RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-ubuntu && chmod 0440 /etc/sudoers.d/99-ubuntu || true
 
 USER ubuntu
 WORKDIR /workspace

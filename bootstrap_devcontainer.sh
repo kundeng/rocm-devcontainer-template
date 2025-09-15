@@ -24,6 +24,7 @@ INSTALL_HOST_ROCM=0
 ROCM_PIN=""
 WANT_LATEST=0
 INSTALL_CODE=1        # install host VS Code via Microsoft APT (no snap)
+DEVCONTAINER_ONLY=0  # when set, only write .devcontainer files and skip host changes
 # ---------------------------------------
 
 log(){ printf "\033[1;36m==> %s\033[0m\n" "$*"; }
@@ -40,6 +41,7 @@ Options:
   --rocm X.Y[.Z]       Pin ROCm version (default: ${DEFAULT_ROCM_FALLBACK})
   --latest             Use the latest available ROCm series
   --force              Overwrite any existing .devcontainer files
+  --devcontainer-only  Only write .devcontainer files; skip host package/driver changes
   --install-host-rocm  Install full ROCm userland on the host (opt-in)
   --no-install-drivers Do not attempt to install kernel GPU drivers (default: install if missing)
   --no-code            Skip installing VS Code on the host
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
   --rocm) ROCM_PIN="${2:?}"; shift 2;;
   --latest) WANT_LATEST=1; shift;;
   --force) FORCE=1; shift;;
+  --devcontainer-only) DEVCONTAINER_ONLY=1; shift;;
   --install-host-rocm) INSTALL_HOST_ROCM=1; shift;;
   --no-install-drivers) INSTALL_DRIVERS=0; shift;;
   --no-code) INSTALL_CODE=0; shift;;

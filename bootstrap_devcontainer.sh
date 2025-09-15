@@ -82,19 +82,15 @@ detect_os(){
 
 # Normalize Microsoft apt source files to avoid conflicting Signed-By values.
 sanitize_microsoft_sources(){
-  # If there are any APT source files referencing packages.microsoft.com, back them up
-  # and remove them so they don't cause Signed-By conflicts. The installer will add
-  # the canonical source as needed.
-  local files
-  files=$(grep -Rls "packages.microsoft.com" /etc/apt/sources.list.d/ 2>/dev/null || true)
-  if [[ -n "$files" ]]; then
-    local backup_dir="/tmp/microsoft-sources-backup-$(date +%s)"
-    sudo_if install -d -m0755 "$backup_dir" || true
-    for f in $files; do
-      sudo_if mv "$f" "$backup_dir/" || true
-    done
-    log "Backed up Microsoft apt source files to $backup_dir and removed originals to avoid Signed-By conflicts."
-  fi
+  # Normalize in-place any Signed-By entries that reference Microsoft packages so
+  # adding the canonical keyring later does not conflict. This edits files under
+  # /etc/apt/sources.list.d/ in-place and is less invasive than removing files.
+  for f in /etc/apt/sources.list.d/*.list; do
+    [[ -f "$f" ]] || continue
+    if grep -q "packages.microsoft.com" "$f" 2>/dev/null; then
+      sudo_if sed -i 's@Signed-By=[^ ]*@Signed-By=/etc/apt/keyrings/microsoft.gpg@g' "$f" || true
+    fi
+  done
 }
 
 ensure_basics(){
@@ -354,6 +350,7 @@ ensure_docker(){
 # ---------- VS Code (host, Microsoft APT; removes snap and conflicting lists) ----------
 install_vscode_host(){
   [[ $INSTALL_CODE -eq 1 ]] || { log "Skipping host VS Code install (--no-code)."; return; }
+  
   case "$PKG" in
     apt)
       if snap list 2>/dev/null | grep -q '^code\s'; then

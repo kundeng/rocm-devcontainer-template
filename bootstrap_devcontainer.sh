@@ -80,9 +80,29 @@ detect_os(){
   fi
 }
 
+# Normalize Microsoft apt source files to avoid conflicting Signed-By values.
+sanitize_microsoft_sources(){
+  # If there are any APT source files referencing packages.microsoft.com, back them up
+  # and remove them so they don't cause Signed-By conflicts. The installer will add
+  # the canonical source as needed.
+  local files
+  files=$(grep -Rls "packages.microsoft.com" /etc/apt/sources.list.d/ 2>/dev/null || true)
+  if [[ -n "$files" ]]; then
+    local backup_dir="/tmp/microsoft-sources-backup-$(date +%s)"
+    sudo_if install -d -m0755 "$backup_dir" || true
+    for f in $files; do
+      sudo_if mv "$f" "$backup_dir/" || true
+    done
+    log "Backed up Microsoft apt source files to $backup_dir and removed originals to avoid Signed-By conflicts."
+  fi
+}
+
 ensure_basics(){
   case "$PKG" in
     apt)
+      # Normalize any existing Microsoft apt source Signed-By entries to avoid
+      # "Conflicting values set for option Signed-By" errors when adding keys.
+      sanitize_microsoft_sources || true
       sudo_if apt-get update -y
       sudo_if apt-get install -y --no-install-recommends \
         curl wget gnupg ca-certificates lsb-release jq git build-essential
@@ -302,6 +322,8 @@ ensure_docker(){
   else
     case "$PKG" in
       apt)
+        # Normalize any existing Microsoft apt source Signed-By entries first
+        sanitize_microsoft_sources || true
         sudo_if apt-get update -y
         sudo_if apt-get install -y ca-certificates curl gnupg
         sudo_if install -m 0755 -d /etc/apt/keyrings
@@ -338,10 +360,8 @@ install_vscode_host(){
         warn "Removing snap 'code' to avoid Dev Containers issues."
         sudo_if snap remove code || true
       fi
-      # Remove conflicting sources that reference the same repo with different keyrings
-      if grep -Rqs "packages.microsoft.com/repos/code" /etc/apt/sources.list.d/; then
-        sudo_if sed -i '/packages.microsoft.com\/repos\/code/d' /etc/apt/sources.list.d/*.list || true
-      fi
+      # Remove or normalize any existing Microsoft apt sources to prevent Signed-By conflicts
+      sanitize_microsoft_sources || true
       sudo_if rm -f /etc/apt/sources.list.d/vscode.list /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
 
       sudo_if install -d -m 0755 /etc/apt/keyrings
@@ -622,4 +642,6 @@ main(){
   echo "If you were just added to docker/render/video groups, open a new shell or reboot."
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
